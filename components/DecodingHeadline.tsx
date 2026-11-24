@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef } from "react";
+import { getSweep, isSweepActive } from "@/lib/heroSignal";
 
 /**
  * DECODING HEADLINE
@@ -74,14 +75,21 @@ const STAGGER = 55;
 const CHAR_IN = 520;
 const SETTLE = 320;
 const HOLD = 4200;
-const OUT_STAGGER = 32;
-const CHAR_OUT = 420;
 
 const IN_DUR = N * STAGGER + CHAR_IN + SETTLE;
-const OUT_START = IN_DUR + HOLD;
-const CYCLE = OUT_START + N * OUT_STAGGER + CHAR_OUT;
+
+/** Softness of the wave front, in fractions of the block's width. */
+const FRONT_W = 0.18;
+/** Front travels past both edges so the copy fully clears and fully returns. */
+const FRONT_FROM = -0.2;
+const FRONT_TO = 1.2;
 
 const randGlyph = () => GLYPHS[(Math.random() * GLYPHS.length) | 0];
+
+const smoothstep = (a: number, b: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
 
 export default function DecodingHeadline() {
   const cellEls = useRef<(HTMLSpanElement | null)[]>([]);
@@ -132,8 +140,34 @@ export default function DecodingHeadline() {
     let raf = 0;
     const start = performance.now();
 
+    /* Each cell's horizontal position across the block, 0..1. Measured from
+       layout rather than assumed, because the three lines use different font
+       sizes and so have different character widths. Re-measured on resize. */
+    const cellX: number[] = new Array(N).fill(0);
+    const measure = () => {
+      const wrap = wrapRef.current;
+      if (!wrap) return;
+      const wr = wrap.getBoundingClientRect();
+      if (wr.width <= 0) return;
+      for (let i = 0; i < N; i++) {
+        const el = cellEls.current[i];
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        cellX[i] = (r.left + r.width / 2 - wr.left) / wr.width;
+      }
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    // Cell widths shift once webfonts swap in, which would skew the wipe.
+    if (typeof document !== "undefined" && document.fonts?.ready) {
+      document.fonts.ready.then(measure).catch(() => undefined);
+    }
+
     const render = (now: number) => {
-      const t = (now - start) % CYCLE;
+      const elapsed = now - start;
+      // The intro decode runs once; after that the wave owns the line.
+      const t = Math.min(elapsed, IN_DUR + HOLD);
+      const inPhase = elapsed < IN_DUR;
 
       // ---- rare, brief whole-block glitch slice ----
       if (wrapRef.current) {
@@ -151,8 +185,13 @@ export default function DecodingHeadline() {
         }
       }
 
-      const inPhase = t < IN_DUR;
-      const outPhase = t >= OUT_START;
+      /* ---- THE WAVE ----
+         travel 0 (cubes at their leftmost) sends the front past the left edge
+         and the line is fully consumed; travel 1 brings it back past the right
+         edge and the line fully returns. A cell is intact while the front is
+         still to its right. */
+      const travel = isSweepActive() ? getSweep() : 1;
+      const front = FRONT_FROM + travel * (FRONT_TO - FRONT_FROM);
 
       for (let i = 0; i < N; i++) {
         if (CHARS[i].ch === " ") {
@@ -185,28 +224,25 @@ export default function DecodingHeadline() {
           continue;
         }
 
-        if (outPhase) {
-          const local = t - OUT_START - (N - 1 - i) * OUT_STAGGER;
-          if (local <= 0) {
-            paint(i, CHARS[i].ch, 1, 0, 0, 0.6, 0);
-          } else if (local < CHAR_OUT) {
-            const p = local / CHAR_OUT;
-            paint(
-              i,
-              GLYPHS[(Math.floor(local / 40) * 5 + i * 11) % GLYPHS.length],
-              1 - p,
-              -18 * p,
-              9 * p,
-              7 * p,
-              p * 0.6
-            );
-          } else {
-            paint(i, " ", 0, -18, 9, 0, 0);
-          }
+        /* ---- WAVE-DRIVEN ----
+           One value drives everything, so erasing and returning are mirror
+           images of each other: the cell dissolves into cipher glyphs as the
+           wave takes it and resolves out of them as the wave gives it back. */
+        const intact = 1 - smoothstep(front - FRONT_W, front + FRONT_W, cellX[i]);
+
+        if (intact < 0.985) {
+          const d = 1 - intact;
+          // brightest exactly at the front, so the wave edge reads as the eraser
+          const edge = Math.exp(-Math.pow((cellX[i] - front) / FRONT_W, 2) * 2.5);
+          const ch =
+            intact > 0.6
+              ? CHARS[i].ch
+              : GLYPHS[(Math.floor(t / 50) * 3 + i * 17) % GLYPHS.length];
+          paint(i, ch, intact, -14 * d, 7 * d, 0.6 + d * 6 + edge * 3, edge);
           continue;
         }
 
-        // ---- HOLD: "Decoding" never settles; the rest breathes ----
+        // ---- settled: "Decoding" never stops resolving; the rest breathes ----
         if (CHARS[i].live) {
           const seed =
             Math.sin((t + i * 311) * 0.004) * Math.sin((t + i * 97) * 0.011);
@@ -232,25 +268,17 @@ export default function DecodingHeadline() {
 
       // ---- underline draws in, retracts on the way out ----
       if (ruleRef.current) {
-        let s: number;
-        let origin: string;
-        if (inPhase) {
-          s = Math.min(1, t / (IN_DUR * 0.82));
-          origin = "left";
-        } else if (outPhase) {
-          s = Math.max(0, 1 - (t - OUT_START) / (CYCLE - OUT_START));
-          origin = "right";
-        } else {
-          s = 1;
-          origin = "left";
-        }
-        ruleRef.current.style.transformOrigin = origin;
+        // after the intro the rule tracks the wave, retracting as it erases
+        const s = inPhase
+          ? Math.min(1, t / (IN_DUR * 0.82))
+          : Math.min(1, Math.max(0, (front - FRONT_FROM) / (1 - FRONT_FROM)));
+        ruleRef.current.style.transformOrigin = "left";
         ruleRef.current.style.transform = `scaleX(${s})`;
       }
 
       // ---- caret blinks only while settled ----
       if (caretRef.current) {
-        const on = !inPhase && !outPhase && Math.floor(t / 480) % 2 === 0;
+        const on = !inPhase && front > 1 && Math.floor(t / 480) % 2 === 0;
         caretRef.current.style.opacity = on ? "1" : "0.05";
       }
 
@@ -258,7 +286,10 @@ export default function DecodingHeadline() {
     };
 
     raf = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", measure);
+    };
   }, []);
 
   const cell = (globalIndex: number) => (

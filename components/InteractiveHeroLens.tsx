@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { ArrowDown } from "lucide-react";
 import DecodingHeadline from "@/components/DecodingHeadline";
+import { publishSweep, resetSweep } from "@/lib/heroSignal";
 
 /**
  * HERO - the face welded into the mask.
@@ -45,6 +46,8 @@ const FACE_SCALE = 1.02;
 const EYE_L = { x: 0.375, y: 0.42 };
 const EYE_R = { x: 0.625, y: 0.42 };
 const FACE_SKIN = 0.26;
+// Push the whole welded composite right, clearing the left for the copy.
+const MASK_SHIFT_X = 0.13;
 
 const VERT = `
 attribute vec2 a_position;
@@ -74,6 +77,7 @@ uniform vec2  u_faceCenter;
 uniform vec2  u_eyeL;
 uniform vec2  u_eyeR;
 uniform float u_skin;
+uniform float u_maskShift;
 
 vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
 vec2 mod289(vec2 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
@@ -142,6 +146,10 @@ void main(){
 
   vec2 pUv = (v_uv - 0.5) / breathe + 0.5;
   pUv += drift + flow * 0.016 + parallax;
+
+  // Applied to pUv itself, before the mask and the face are sampled, so the
+  // two stay welded and translate as one image.
+  pUv.x -= u_maskShift;
 
   /* ---------------- THE MASK ---------------- */
   vec3 maskCol = sampleMask(pUv);
@@ -389,6 +397,7 @@ export default function InteractiveHeroLens() {
       eyeL: gl.getUniformLocation(program, "u_eyeL"),
       eyeR: gl.getUniformLocation(program, "u_eyeR"),
       skin: gl.getUniformLocation(program, "u_skin"),
+      maskShift: gl.getUniformLocation(program, "u_maskShift"),
     };
 
     // The vertex shader already flips v (top-left origin), which matches the
@@ -418,6 +427,79 @@ export default function InteractiveHeroLens() {
 
     const videoTex = makeTex();
     const faceTex = makeTex();
+
+    /* ---- WAVE PROBE -------------------------------------------------
+       The clip's cube-wave is IN the footage, so its position is measured
+       rather than guessed: each pass draws the frame into a 64x36 scratch
+       canvas and takes the luminance-weighted horizontal centroid. That
+       value is mapped back through the shader's cover-fit and rightward
+       shift into screen space, then published for the headline.
+       Sampled every 3rd frame (~20Hz) - the sweep is slow, and getImageData
+       every frame is wasted work.                                        */
+    const PW = 64;
+    const PH = 36;
+    const probe = document.createElement("canvas");
+    probe.width = PW;
+    probe.height = PH;
+    const pctx = probe.getContext("2d", { willReadFrequently: true });
+    let sweepSmoothed = 1;
+    let probeTick = 0;
+    // Auto-calibration: the centroid only travels across part of the frame,
+    // so its observed extremes are tracked and the value is renormalised to
+    // 0..1 of ACTUAL travel. Expands to a new extreme fast, contracts slowly.
+    let sMin = 1;
+    let sMax = 0;
+
+    const videoXToScreenX = (u: number) => {
+      const sA = canvas.width / Math.max(1, canvas.height);
+      const iA = videoW / Math.max(1, videoH);
+      // inverse of the shader's coverUv on x, then undo the shift
+      const x = sA > iA ? u : (u - 0.5) / (sA / iA) + 0.5;
+      return x + MASK_SHIFT_X;
+    };
+
+    const measureSweep = () => {
+      if (!pctx || !video) return;
+      try {
+        pctx.drawImage(video, 0, 0, PW, PH);
+      } catch {
+        return;
+      }
+      let data: Uint8ClampedArray;
+      try {
+        data = pctx.getImageData(0, 0, PW, PH).data;
+      } catch {
+        return;
+      }
+
+      let wsum = 0;
+      let xsum = 0;
+      for (let x = 0; x < PW; x++) {
+        let col = 0;
+        for (let y = 0; y < PH; y++) {
+          const o = (y * PW + x) * 4;
+          const l = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2];
+          // bias toward the bright cubes rather than the dim background
+          col += l * l;
+        }
+        wsum += col;
+        xsum += col * x;
+      }
+      if (wsum <= 0) return;
+
+      const u = xsum / wsum / (PW - 1);
+      const screenX = videoXToScreenX(u);
+
+      // ease, or the centroid jitters frame to frame
+      sweepSmoothed += (screenX - sweepSmoothed) * 0.12;
+
+      sMin += (sweepSmoothed - sMin) * (sweepSmoothed < sMin ? 0.5 : 0.002);
+      sMax += (sweepSmoothed - sMax) * (sweepSmoothed > sMax ? 0.5 : 0.002);
+
+      const span = Math.max(0.05, sMax - sMin);
+      const travel = Math.min(1, Math.max(0, (sweepSmoothed - sMin) / span));
+      publishSweep(travel);
+    };
 
     let faceAspect = 765 / 1024;
     let faceLoaded = false;
@@ -520,14 +602,19 @@ export default function InteractiveHeroLens() {
       gl.uniform2f(U.eyeL, EYE_L.x, EYE_L.y);
       gl.uniform2f(U.eyeR, EYE_R.x, EYE_R.y);
       gl.uniform1f(U.skin, FACE_SKIN);
+      gl.uniform1f(U.maskShift, MASK_SHIFT_X);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      if (hasVideo && ++probeTick % 3 === 0) measureSweep();
+
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
 
     return () => {
       cancelAnimationFrame(raf);
+      resetSweep();
       window.removeEventListener("resize", resize);
       if (video) {
         video.removeEventListener("loadeddata", onVideoReady);
