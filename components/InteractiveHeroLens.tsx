@@ -593,12 +593,23 @@ export default function InteractiveHeroLens() {
       )}
 
       <div className="absolute inset-x-0 top-0 h-32 z-[12] pointer-events-none bg-gradient-to-b from-black/70 to-transparent" />
-      <div className="absolute inset-x-0 bottom-0 h-[55%] z-[12] pointer-events-none bg-gradient-to-t from-black/92 via-black/45 to-transparent" />
+      <div className="absolute inset-x-0 bottom-0 h-[42%] z-[12] pointer-events-none bg-gradient-to-t from-black/90 via-black/40 to-transparent" />
+      {/* keeps the upper-left copy legible against the mask's bright side */}
+      <div className="absolute inset-y-0 left-0 w-[65%] z-[12] pointer-events-none bg-gradient-to-r from-black/85 via-black/35 to-transparent" />
 
       {/* ---------------- THE ONLY WORDS IN THE HERO ---------------- */}
-      <div className="absolute left-6 sm:left-12 md:left-16 lg:left-24 bottom-20 sm:bottom-24 md:bottom-28 z-30 pointer-events-none">
+      <div className="absolute left-6 sm:left-12 md:left-16 lg:left-24 top-[26%] sm:top-[27%] md:top-[28%] z-30 pointer-events-none">
         <DecodingHeadline />
       </div>
+
+      {/* ---------------- CORNER CTA ---------------- */}
+      <button
+        onClick={scrollToStory}
+        className="group absolute right-6 sm:right-10 md:right-14 bottom-8 sm:bottom-10 z-30 pointer-events-auto inline-flex items-center gap-2 rounded-full border border-cyan-400/40 bg-black/60 px-4 py-2.5 sm:px-5 sm:py-3 text-[11px] sm:text-xs font-mono uppercase tracking-widest text-cyan-200 backdrop-blur-md shadow-lg shadow-cyan-500/20 transition-all duration-300 hover:border-cyan-300 hover:bg-cyan-400 hover:text-black cursor-pointer"
+      >
+        <span>Let&apos;s Explore</span>
+        <ArrowDown className="w-3.5 h-3.5 transition-transform duration-300 group-hover:translate-y-0.5" />
+      </button>
 
       {/* Wordless scroll affordance */}
       <button

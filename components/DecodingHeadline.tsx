@@ -5,14 +5,14 @@ import React, { useEffect, useRef } from "react";
 /**
  * DECODING HEADLINE
  *
- * "I'm Evans. Decoding ideas into software." - animated as the thing it
- * describes. The line is never typed; it is DECRYPTED.
+ * "Hii / I'm Evans. / Decoding ideas into software." - animated as the thing
+ * it describes. The lines are never typed; they are DECRYPTED.
  *
  * Cycle (loops forever, ~9s):
  *   MATERIALISE  each cell cycles random cipher glyphs, rising out of blur
- *                with a hard cyan/magenta RGB split, locking left-to-right
- *                in a wave with a flash as it snaps. A scan bar sweeps the
- *                block as it resolves and an underline draws beneath it.
+ *                with a hard cyan/magenta RGB split, locking top-left to
+ *                bottom-right in a wave with a flash as it snaps. A scan bar
+ *                sweeps the block and an underline draws beneath it.
  *   HOLD         settled, breathing glow, blinking caret. The word
  *                "Decoding" keeps quietly re-scrambling - the decode never
  *                finishes. Occasional whole-block glitch slice.
@@ -23,28 +23,51 @@ import React, { useEffect, useRef } from "react";
  * reflow the line on every frame.
  *
  * Everything animates by mutating DOM refs inside one rAF loop - no React
- * state per frame, so ~40 cells cost zero re-renders. Honours
+ * state per frame, so ~42 cells cost zero re-renders. Honours
  * prefers-reduced-motion and exposes the real sentence to assistive tech.
  */
 
-const LINE_1 = "I'm Evans.";
-const LINE_2 = "Decoding ideas into software.";
-const FULL_TEXT = `${LINE_1} ${LINE_2}`;
+type LineSpec = {
+  text: string;
+  className: string;
+  /** [from, to) character range that never stops re-scrambling */
+  live?: [number, number];
+};
 
-// "Decoding" - the word that never finishes resolving
-const LIVE_FROM = 0;
-const LIVE_TO = 8;
+const LINES: LineSpec[] = [
+  {
+    text: "Hii",
+    className:
+      "font-mono font-semibold tracking-[0.35em] text-fuchsia-300 text-sm sm:text-base md:text-lg",
+  },
+  {
+    text: "I'm Evans.",
+    className:
+      "font-mono font-bold tracking-tight text-white text-2xl sm:text-3xl md:text-4xl lg:text-5xl leading-[1.15] mt-2",
+  },
+  {
+    text: "Decoding ideas into software.",
+    className:
+      "font-mono font-semibold tracking-tight text-cyan-200/90 text-base sm:text-xl md:text-2xl lg:text-3xl leading-[1.3] mt-1.5",
+    live: [0, 8], // "Decoding"
+  },
+];
+
+const FULL_TEXT = LINES.map((l) => l.text).join(" ");
 
 const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<>/\\|{}[]=+-_~^*#$%&@";
 
-const L1 = LINE_1.split("");
-const L2 = LINE_2.split("");
-
 // One flat, stable list: index here === index in the ref array
-const CHARS: { ch: string; live: boolean }[] = [
-  ...L1.map((ch) => ({ ch, live: false })),
-  ...L2.map((ch, i) => ({ ch, live: i >= LIVE_FROM && i < LIVE_TO })),
-];
+const CHARS: { ch: string; live: boolean }[] = [];
+const LINE_OFFSETS: number[] = [];
+for (const line of LINES) {
+  LINE_OFFSETS.push(CHARS.length);
+  const chars = line.text.split("");
+  for (let i = 0; i < chars.length; i++) {
+    const live = !!line.live && i >= line.live[0] && i < line.live[1];
+    CHARS.push({ ch: chars[i], live });
+  }
+}
 const N = CHARS.length;
 
 const STAGGER = 55;
@@ -267,22 +290,22 @@ export default function DecodingHeadline() {
           }}
         />
 
-        <div className="font-mono font-bold tracking-tight text-white text-2xl sm:text-3xl md:text-4xl lg:text-5xl leading-[1.15]">
-          {L1.map((_, i) => cell(i))}
-        </div>
-
-        <div className="font-mono font-semibold tracking-tight text-cyan-200/90 text-base sm:text-xl md:text-2xl lg:text-3xl leading-[1.3] mt-1.5">
-          {L2.map((_, i) => cell(L1.length + i))}
-          <span
-            ref={caretRef}
-            className="ml-1 inline-block align-middle bg-cyan-300"
-            style={{
-              width: "0.55ch",
-              height: "1em",
-              boxShadow: "0 0 14px rgba(0,229,255,0.9)",
-            }}
-          />
-        </div>
+        {LINES.map((line, li) => (
+          <div key={li} className={line.className}>
+            {line.text.split("").map((_, i) => cell(LINE_OFFSETS[li] + i))}
+            {li === LINES.length - 1 && (
+              <span
+                ref={caretRef}
+                className="ml-1 inline-block align-middle bg-cyan-300"
+                style={{
+                  width: "0.55ch",
+                  height: "1em",
+                  boxShadow: "0 0 14px rgba(0,229,255,0.9)",
+                }}
+              />
+            )}
+          </div>
+        ))}
 
         <div className="relative mt-4 h-px w-full max-w-[34ch]">
           <div
