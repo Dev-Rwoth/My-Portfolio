@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { ArrowDown } from "lucide-react";
+import DecodingHeadline from "@/components/DecodingHeadline";
 
 /**
  * HERO - the face welded into the mask.
@@ -272,7 +273,6 @@ export default function InteractiveHeroLens() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const [glFailed, setGlFailed] = useState(false);
-  const [mouseVelocity, setMouseVelocity] = useState(0);
 
   const mouseRef = useRef({ targetX: 0.5, targetY: 0.42, speed: 0 });
 
@@ -307,7 +307,6 @@ export default function InteractiveHeroLens() {
       mouseRef.current.targetX = nx;
       mouseRef.current.targetY = ny;
       mouseRef.current.speed = Math.min(Math.sqrt(dx * dx + dy * dy) * 18, 1);
-      setMouseVelocity(mouseRef.current.speed);
     },
     []
   );
@@ -594,77 +593,22 @@ export default function InteractiveHeroLens() {
       )}
 
       <div className="absolute inset-x-0 top-0 h-32 z-[12] pointer-events-none bg-gradient-to-b from-black/70 to-transparent" />
-      <div className="absolute inset-x-0 bottom-0 h-[45%] z-[12] pointer-events-none bg-gradient-to-t from-black/90 via-black/35 to-transparent" />
+      <div className="absolute inset-x-0 bottom-0 h-[55%] z-[12] pointer-events-none bg-gradient-to-t from-black/92 via-black/45 to-transparent" />
 
-      <header className="absolute top-6 left-6 right-6 z-40 flex items-center justify-between text-xs font-mono uppercase tracking-widest text-zinc-400 pointer-events-auto">
-        <div className="flex items-center gap-3 bg-black/60 backdrop-blur-md px-4 py-2 rounded-full border border-white/10 shadow-xl">
-          <span className="w-2 h-2 rounded-full bg-fuchsia-400 animate-pulse" />
-          <span className="text-white font-bold tracking-wider">EVANS RWOTHOMIO</span>
-          <span className="text-zinc-500">/</span>
-          <span className="text-cyan-400 hidden sm:inline">SIGNAL ACQUIRED</span>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <a
-            href="mailto:evansrwothomio20@gmail.com?subject=Hello%20Evans%20-%20Portfolio%20Inquiry"
-            className="hidden sm:inline-flex items-center gap-1.5 bg-cyan-500/20 hover:bg-cyan-400 text-cyan-300 hover:text-black font-semibold px-4 py-2 rounded-full backdrop-blur-md border border-cyan-500/30 transition-all duration-300 text-xs tracking-wider shadow-lg"
-          >
-            <span>Email Evans</span>
-          </a>
-          <button
-            onClick={scrollToStory}
-            className="bg-white/10 hover:bg-white text-white hover:text-black font-semibold px-4 sm:px-5 py-2 rounded-full backdrop-blur-md border border-white/15 transition-all duration-300 text-xs tracking-wider cursor-pointer shadow-lg"
-          >
-            Story &amp; Works &#8595;
-          </button>
-        </div>
-      </header>
-
-      <div className="absolute left-6 sm:left-12 md:left-16 lg:left-24 bottom-16 sm:bottom-20 md:bottom-24 z-30 pointer-events-auto">
-        <div className="flex flex-wrap items-center gap-4">
-          <button
-            onClick={scrollToStory}
-            className="px-7 sm:px-9 py-3.5 sm:py-4 rounded-full bg-white text-zinc-950 font-bold text-xs sm:text-sm uppercase tracking-wider hover:bg-cyan-400 hover:text-black transition-all duration-300 shadow-2xl shadow-fuchsia-500/25 flex items-center gap-2.5 group cursor-pointer"
-          >
-            <span>Enter Portfolio</span>
-            <ArrowDown className="w-4 h-4 group-hover:translate-y-1 transition-transform" />
-          </button>
-
-          <div className="flex items-center gap-2.5 text-xs font-mono text-zinc-300 bg-black/60 backdrop-blur-md px-4 py-3 rounded-full border border-white/10 shadow-lg">
-            <span
-              className={
-                "w-2 h-2 rounded-full " +
-                (mouseVelocity > 0.15 ? "bg-fuchsia-400 animate-ping" : "bg-cyan-400")
-              }
-            />
-            <span className="hidden sm:inline">Move to resolve</span>
-            <span className="sm:hidden">Swipe to resolve</span>
-          </div>
-        </div>
+      {/* ---------------- THE ONLY WORDS IN THE HERO ---------------- */}
+      <div className="absolute left-6 sm:left-12 md:left-16 lg:left-24 bottom-20 sm:bottom-24 md:bottom-28 z-30 pointer-events-none">
+        <DecodingHeadline />
       </div>
 
-      <div className="absolute right-6 sm:right-12 bottom-8 sm:bottom-12 z-30 hidden md:flex flex-col items-end pointer-events-none text-right font-mono">
-        <span className="text-[11px] text-cyan-400 uppercase tracking-widest font-semibold">
-          {"// FUTURISTIC / SYNTHWAVE / DUOTONE"}
-        </span>
-        <span className="text-white font-extrabold text-sm sm:text-base mt-1 drop-shadow-md">
-          EVANS RWOTHOMIO
-        </span>
-        <span className="text-zinc-400 text-xs">
-          Full-Stack Systems Engineer &bull; Uganda
-        </span>
-      </div>
-
+      {/* Wordless scroll affordance */}
       <button
         onClick={scrollToStory}
         aria-label="Scroll to main content"
-        className="absolute bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-30 text-zinc-400 hover:text-cyan-400 transition-colors p-2 cursor-pointer flex flex-col items-center gap-1 group"
+        className="absolute bottom-5 sm:bottom-7 left-1/2 -translate-x-1/2 z-30 text-zinc-400 hover:text-cyan-400 transition-colors p-2 cursor-pointer"
       >
-        <span className="text-[10px] font-mono tracking-widest uppercase opacity-0 group-hover:opacity-100 transition-opacity">
-          SCROLL
-        </span>
-        <ArrowDown className="w-4 h-4 animate-bounce" />
+        <ArrowDown className="w-5 h-5 animate-bounce" />
       </button>
+
     </section>
   );
 }
