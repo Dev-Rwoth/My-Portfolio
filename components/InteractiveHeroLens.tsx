@@ -1,54 +1,211 @@
 "use client";
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { ArrowDown, Sparkles } from "lucide-react";
+import { ArrowDown } from "lucide-react";
 
 /**
- * HERO MEDIA - "Birth of Artificial Intelligence" (futuristic / synthwave duotone)
+ * HERO - "The machine dreams a face."
  *
- * Reference clip: iStock #1145176105 (royalty-free, licence required).
- * Drop the licensed download at `public/hero-ai.mp4` (optionally `public/hero-ai.webm`
- * and a still at `public/hero-ai-poster.jpg`) and it becomes the hero background
- * automatically - this component probes for it on mount.
+ * The AI motion graphic (public/hero-ai.mp4) is the mask. Evans' portrait
+ * (public/evans-portrait.png) is composited INTO it on the GPU so the face
+ * is never a photo pasted on top - it materialises out of the data stream:
  *
- * Until that file exists, the same look is generated live on canvas: a duotone
- * magenta/cyan neural network igniting from a central core over a synthwave grid.
+ *   - the face resolves where the clip is energetic (bright data = more face)
+ *   - a scan sweep travels up the frame, printing the face as it passes
+ *   - the cursor is a clarity lens that parts the mask and sharpens the face
+ *   - where the mask wins, the face smears along a flow field and splits into
+ *     RGB fringes, so it dissolves back into the stream instead of cutting off
+ *
+ * The portrait's white studio background is keyed out in-shader (luma + low
+ * saturation) and softened by an elliptical falloff, so there is no visible
+ * photo rectangle - only the head emerging.
  */
 
 const VIDEO_SRC = "/hero-ai.mp4";
-const VIDEO_SRC_WEBM = "/hero-ai.webm";
-const POSTER_SRC = "/hero-ai-poster.jpg";
+const FACE_SRC = "/evans-portrait.png";
 
-type NeuralNode = {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  r: number;
-  phase: number;
-  depth: number;
-};
+const VERT = `
+attribute vec2 a_position;
+varying vec2 v_uv;
+void main() {
+  v_uv = (a_position + 1.0) * 0.5;
+  v_uv.y = 1.0 - v_uv.y;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
 
-type Signal = { a: number; b: number; t: number; speed: number };
+const FRAG = `
+precision highp float;
+varying vec2 v_uv;
+
+uniform sampler2D u_video;
+uniform sampler2D u_face;
+uniform vec2  u_res;
+uniform vec2  u_videoRes;
+uniform vec2  u_mouse;
+uniform float u_time;
+uniform float u_velocity;
+uniform float u_hasVideo;
+uniform float u_boxW;
+uniform float u_boxH;
+
+/* ---- simplex noise ---- */
+vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
+vec2 mod289(vec2 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
+vec3 permute(vec3 x){ return mod289(((x*34.0)+1.0)*x); }
+float snoise(vec2 v){
+  const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+                     -0.577350269189626, 0.024390243902439);
+  vec2 i  = floor(v + dot(v, C.yy));
+  vec2 x0 = v - i + dot(i, C.xx);
+  vec2 i1 = (x0.x > x0.y) ? vec2(1.0,0.0) : vec2(0.0,1.0);
+  vec4 x12 = x0.xyxy + C.xxzz;
+  x12.xy -= i1;
+  i = mod289(i);
+  vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+  vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+  m = m*m; m = m*m;
+  vec3 x = 2.0 * fract(p * C.www) - 1.0;
+  vec3 h = abs(x) - 0.5;
+  vec3 ox = floor(x + 0.5);
+  vec3 a0 = x - ox;
+  m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+  vec3 g;
+  g.x  = a0.x  * x0.x  + h.x  * x0.y;
+  g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+  return 130.0 * dot(m, g);
+}
+float fbm(vec2 p){
+  float v = 0.0;
+  v += 0.5000 * snoise(p); p *= 2.02;
+  v += 0.2500 * snoise(p); p *= 2.03;
+  v += 0.1250 * snoise(p);
+  return v;
+}
+
+float luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+/* object-fit: cover */
+vec2 coverUv(vec2 uv, vec2 screenRes, vec2 imgRes){
+  float sA = screenRes.x / screenRes.y;
+  float iA = imgRes.x / imgRes.y;
+  vec2 c = uv;
+  if (sA > iA) { float s = iA / sA; c.y = (uv.y - 0.5) * s + 0.5; }
+  else         { float s = sA / iA; c.x = (uv.x - 0.5) * s + 0.5; }
+  return c;
+}
+
+void main(){
+  float sA = u_res.x / u_res.y;
+  float t  = u_time;
+
+  /* ---------------- THE MASK: the AI clip ---------------- */
+  vec2 flow = vec2(
+    fbm(v_uv * 3.0 + vec2( t * 0.10, t * 0.07)),
+    fbm(v_uv * 3.0 + vec2(-t * 0.09, t * 0.11))
+  );
+
+  vec2 vUv = coverUv(v_uv, u_res, u_videoRes);
+  vec3 videoCol = texture2D(u_video, vUv).rgb;
+
+  // Procedural synthwave nebula: carries the look before the clip decodes
+  float neb = fbm(v_uv * 2.4 + flow * 0.5 + vec2(t * 0.05, -t * 0.04));
+  vec3 proc = mix(vec3(0.03, 0.00, 0.09), vec3(0.22, 0.03, 0.38), neb * 0.5 + 0.5);
+  proc += vec3(0.00, 0.35, 0.55) * pow(max(0.0, 1.0 - length(v_uv - vec2(0.5, 0.45)) * 1.8), 3.0) * 0.5;
+
+  vec3 base = mix(proc, videoCol, u_hasVideo);
+  float energy = luma(base);
+
+  /* ---------------- THE PORTRAIT BOX ---------------- */
+  vec2 faceCenter = vec2(0.5, 0.47);
+  vec2 fUv = (v_uv - faceCenter) / vec2(u_boxW, u_boxH) + 0.5;
+
+  /* ---------------- THE REVEAL MASK ---------------- */
+  float dMouse = length((v_uv - u_mouse) * vec2(sA, 1.0));
+  float lens   = 1.0 - smoothstep(0.08, 0.46, dMouse);
+
+  float grain  = fbm(v_uv * 3.6 + vec2(t * 0.08, -t * 0.06)) * 0.5 + 0.5;
+  float breath = 0.5 + 0.5 * sin(t * 0.55);
+
+  // Printing sweep: travels up the frame, resolving the face as it passes
+  float scanY = fract(t * 0.13);
+  float scan  = exp(-abs(v_uv.y - scanY) * 7.0);
+
+  float reveal = 0.42
+               + energy * 0.40
+               + grain  * 0.18
+               + lens   * 0.45
+               + breath * 0.10
+               + scan   * 0.30;
+  reveal = smoothstep(0.38, 0.74, reveal);
+
+  /* ---------------- SAMPLE THE FACE ---------------- */
+  // Where the mask wins, the face smears along the flow field
+  vec2 fUvD = fUv + flow * (1.0 - reveal) * 0.055;
+
+  // RGB dispersion: strongest at the dissolving edges and under fast cursor motion
+  float ca = 0.0035 + u_velocity * 0.012 + (1.0 - reveal) * 0.010;
+  vec3 faceCol;
+  faceCol.r = texture2D(u_face, fUvD + vec2(ca, 0.0)).r;
+  faceCol.g = texture2D(u_face, fUvD).g;
+  faceCol.b = texture2D(u_face, fUvD - vec2(ca, 0.0)).b;
+
+  /* ---------------- KEY OUT THE WHITE STUDIO BACKDROP ---------------- */
+  float fl  = luma(faceCol);
+  float mx  = max(faceCol.r, max(faceCol.g, faceCol.b));
+  float mn  = min(faceCol.r, min(faceCol.g, faceCol.b));
+  float sat = mx - mn;
+
+  // bright + desaturated => backdrop, drop it
+  float keyA = 1.0 - smoothstep(0.60, 0.88, fl) * (1.0 - smoothstep(0.09, 0.24, sat));
+
+  // elliptical falloff centred on the head, so nothing reads as a photo edge
+  vec2  e   = (fUv - vec2(0.5, 0.43)) / vec2(0.47, 0.52);
+  float ell = 1.0 - smoothstep(0.74, 1.04, length(e));
+
+  // stay inside the portrait box
+  vec2 inside = step(vec2(0.0), fUvD) * step(fUvD, vec2(1.0));
+  float faceAlpha = keyA * ell * inside.x * inside.y;
+
+  /* ---------------- GRADE THE FACE INTO THE PALETTE ---------------- */
+  vec3 duo = mix(vec3(0.16, 0.02, 0.30), vec3(0.58, 0.93, 1.0), fl);
+  vec3 graded = mix(faceCol * 1.12, duo, 0.38);
+  // let the data stream glow through the skin
+  graded += base * 0.18;
+
+  /* ---------------- COMPOSITE ---------------- */
+  float m = reveal * faceAlpha;
+  vec3 color = mix(base, graded, m);
+
+  // Materialising fringe where the face is half-resolved
+  float edge = pow(1.0 - abs(reveal * 2.0 - 1.0), 3.0);
+  vec3 fringe = mix(vec3(1.0, 0.18, 0.60), vec3(0.10, 0.90, 1.0), grain);
+  color += fringe * edge * faceAlpha * 0.55;
+
+  // Rim light tracing the keyed silhouette
+  float rim = pow(1.0 - abs(faceAlpha * 2.0 - 1.0), 4.0) * reveal;
+  color += mix(vec3(0.05, 0.85, 1.0), vec3(1.0, 0.25, 0.70), breath) * rim * 0.40;
+
+  /* ---------------- CRT FINISH ---------------- */
+  float sl = sin(v_uv.y * u_res.y * 1.5) * 0.5 + 0.5;
+  color *= 1.0 - sl * 0.055;
+
+  float vig = length(v_uv - 0.5);
+  color *= 1.0 - smoothstep(0.42, 0.95, vig) * 0.55;
+
+  gl_FragColor = vec4(color, 1.0);
+}
+`;
 
 export default function InteractiveHeroLens() {
   const containerRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [hasVideo, setHasVideo] = useState(false);
-  const [videoSrc, setVideoSrc] = useState<string | null>(null);
-  const [hasPoster, setHasPoster] = useState(false);
-  const [videoReady, setVideoReady] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  const [glFailed, setGlFailed] = useState(false);
   const [mouseVelocity, setMouseVelocity] = useState(0);
 
-  const mouseRef = useRef({ targetX: 0.5, targetY: 0.5, speed: 0 });
-  // Once the clip is actually painting frames the generated field is torn down,
-  // so the footage shows exactly as authored and nothing burns CPU behind it.
-  const videoReadyRef = useRef(false);
-
-  const markVideoReady = useCallback(() => {
-    videoReadyRef.current = true;
-    setVideoReady(true);
-  }, []);
+  const mouseRef = useRef({ targetX: 0.5, targetY: 0.42, speed: 0 });
 
   const scrollToStory = () => {
     const el = document.getElementById("story");
@@ -86,327 +243,232 @@ export default function InteractiveHeroLens() {
     []
   );
 
-  /* ---------------- PROBE FOR THE LICENSED STOCK CLIP ---------------- */
-  useEffect(() => {
-    let cancelled = false;
-
-    const probe = async (url: string) => {
-      try {
-        const res = await fetch(url, { method: "HEAD" });
-        const type = res.headers.get("content-type") || "";
-        return res.ok && !type.includes("text/html");
-      } catch {
-        return false;
-      }
-    };
-
-    (async () => {
-      const [mp4, webm, poster] = await Promise.all([
-        probe(VIDEO_SRC),
-        probe(VIDEO_SRC_WEBM),
-        probe(POSTER_SRC),
-      ]);
-      if (cancelled) return;
-      setHasPoster(poster);
-      if (mp4 || webm) {
-        setVideoSrc(mp4 ? VIDEO_SRC : VIDEO_SRC_WEBM);
-        setHasVideo(true);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  /* ---------------- GENERATED "BIRTH OF AI" NEURAL FIELD ---------------- */
   useEffect(() => {
     const canvas = canvasRef.current;
+    const video = videoRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return;
 
-    const prefersReduced =
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const gl = (canvas.getContext("webgl", {
+      alpha: false,
+      antialias: true,
+      powerPreference: "high-performance",
+    }) ||
+      canvas.getContext("experimental-webgl")) as WebGLRenderingContext | null;
+
+    if (!gl) {
+      setGlFailed(true);
+      return;
+    }
+
+    const compile = (type: number, src: string) => {
+      const sh = gl.createShader(type);
+      if (!sh) return null;
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        console.error("shader:", gl.getShaderInfoLog(sh));
+        gl.deleteShader(sh);
+        return null;
+      }
+      return sh;
+    };
+
+    const vs = compile(gl.VERTEX_SHADER, VERT);
+    const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+    if (!vs || !fs) {
+      setGlFailed(true);
+      return;
+    }
+
+    const program = gl.createProgram();
+    if (!program) {
+      setGlFailed(true);
+      return;
+    }
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error("link:", gl.getProgramInfoLog(program));
+      setGlFailed(true);
+      return;
+    }
+    gl.useProgram(program);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
+      gl.STATIC_DRAW
+    );
+    const aPos = gl.getAttribLocation(program, "a_position");
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    const U = {
+      video: gl.getUniformLocation(program, "u_video"),
+      face: gl.getUniformLocation(program, "u_face"),
+      res: gl.getUniformLocation(program, "u_res"),
+      videoRes: gl.getUniformLocation(program, "u_videoRes"),
+      mouse: gl.getUniformLocation(program, "u_mouse"),
+      time: gl.getUniformLocation(program, "u_time"),
+      velocity: gl.getUniformLocation(program, "u_velocity"),
+      hasVideo: gl.getUniformLocation(program, "u_hasVideo"),
+      boxW: gl.getUniformLocation(program, "u_boxW"),
+      boxH: gl.getUniformLocation(program, "u_boxH"),
+    };
+
+    // The vertex shader already flips v so that v_uv is top-left origin, which
+    // matches the default upload order (row 0 = top of image). Flipping here as
+    // well would invert both the clip and the portrait.
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+
+    const makeTex = () => {
+      const tx = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tx);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        1,
+        1,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        new Uint8Array([8, 2, 20, 255])
+      );
+      return tx;
+    };
+
+    const videoTex = makeTex();
+    const faceTex = makeTex();
+
+    // Portrait aspect drives the box; refined once the PNG reports its size
+    let faceAspect = 765 / 1024;
+    let faceLoaded = false;
+
+    const faceImg = new Image();
+    faceImg.src = FACE_SRC;
+    faceImg.onload = () => {
+      faceAspect = (faceImg.naturalWidth || 765) / (faceImg.naturalHeight || 1024);
+      gl.bindTexture(gl.TEXTURE_2D, faceTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, faceImg);
+      faceLoaded = true;
+      sizeBox();
+    };
+
+    let boxW = 0.42;
+    let boxH = 1.0;
+
+    // Fit the portrait: full height where there is room, shrunk on narrow screens
+    const sizeBox = () => {
+      const sAspect = canvas.width / Math.max(1, canvas.height);
+      boxH = 1.02;
+      boxW = (boxH * faceAspect) / sAspect;
+      if (boxW > 0.88) {
+        boxW = 0.88;
+        boxH = (boxW * sAspect) / faceAspect;
+      }
+    };
 
     let width = 0;
     let height = 0;
-    let dpr = 1;
-    let frame = 0;
-    let nodes: NeuralNode[] = [];
-    let signals: Signal[] = [];
-
-    const NODE_COUNT = 120;
-    const LINK_DIST = 170;
-
-    const seed = () => {
-      nodes = [];
-      for (let i = 0; i < NODE_COUNT; i++) {
-        // Bias toward a dense core so the network reads as a mind forming
-        const a = Math.random() * Math.PI * 2;
-        const rad = Math.pow(Math.random(), 0.65);
-        const depth = 0.35 + Math.random() * 0.65;
-        nodes.push({
-          x: width * 0.5 + Math.cos(a) * rad * width * 0.46,
-          y: height * 0.46 + Math.sin(a) * rad * height * 0.44,
-          vx: (Math.random() - 0.5) * 0.28,
-          vy: (Math.random() - 0.5) * 0.28,
-          r: 0.7 + Math.random() * 1.9,
-          phase: Math.random() * Math.PI * 2,
-          depth,
-        });
-      }
-      signals = Array.from({ length: 26 }, () => ({
-        a: Math.floor(Math.random() * NODE_COUNT),
-        b: Math.floor(Math.random() * NODE_COUNT),
-        t: Math.random(),
-        speed: 0.004 + Math.random() * 0.012,
-      }));
-    };
-
     const resize = () => {
       const el = containerRef.current;
-      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
       width = el ? el.clientWidth : window.innerWidth;
       height = el ? el.clientHeight : window.innerHeight;
       canvas.width = Math.floor(width * dpr);
       canvas.height = Math.floor(height * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      seed();
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      sizeBox();
     };
-
     window.addEventListener("resize", resize);
     resize();
 
-    // Duotone synthwave ramp: hot magenta -> electric cyan
-    const duotone = (t: number, alpha: number) => {
-      const c = Math.max(0, Math.min(1, t));
-      const r = Math.round(255 * (1 - c) + 24 * c);
-      const g = Math.round(45 * (1 - c) + 229 * c);
-      const b = Math.round(149 * (1 - c) + 255 * c);
-      return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
+    let videoReady = false;
+    let videoW = 1920;
+    let videoH = 1080;
+    const onVideoReady = () => {
+      if (!video) return;
+      videoW = video.videoWidth || 1920;
+      videoH = video.videoHeight || 1080;
+      videoReady = true;
     };
+    if (video) {
+      video.addEventListener("loadeddata", onVideoReady);
+      video.addEventListener("playing", onVideoReady);
+      const p = video.play();
+      if (p && typeof p.catch === "function") p.catch(() => undefined);
+    }
 
     let mx = 0.5;
-    let my = 0.5;
+    let my = 0.42;
     let vel = 0;
+    const start = performance.now();
     let raf = 0;
 
-    const render = () => {
-      // The licensed clip has taken over - stop drawing and stop rescheduling.
-      if (videoReadyRef.current) return;
+    const render = (now: number) => {
+      const t = (now - start) * 0.001;
 
-      frame++;
-      const time = frame * 0.016;
-
-      mx += (mouseRef.current.targetX - mx) * 0.07;
-      my += (mouseRef.current.targetY - my) * 0.07;
+      mx += (mouseRef.current.targetX - mx) * 0.08;
+      my += (mouseRef.current.targetY - my) * 0.08;
       vel += (mouseRef.current.speed - vel) * 0.1;
       mouseRef.current.speed *= 0.94;
 
-      const px = (mx - 0.5) * 2;
-
-      /* ---- VOID BACKDROP ---- */
-      const bg = ctx.createLinearGradient(0, 0, 0, height);
-      bg.addColorStop(0, "#05000f");
-      bg.addColorStop(0.55, "#0d0124");
-      bg.addColorStop(1, "#16002e");
-      ctx.fillStyle = bg;
-      ctx.fillRect(0, 0, width, height);
-
-      /* ---- HORIZON SUN BLOOM ---- */
-      const hy = height * 0.74;
-      const sunX = width * 0.5 - px * 26;
-      const sun = ctx.createRadialGradient(sunX, hy, 0, sunX, hy, Math.max(width, height) * 0.5);
-      sun.addColorStop(0, "rgba(255,70,160,0.30)");
-      sun.addColorStop(0.35, "rgba(140,30,180,0.16)");
-      sun.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = sun;
-      ctx.fillRect(0, 0, width, height);
-
-      /* ---- SYNTHWAVE PERSPECTIVE GRID ---- */
-      ctx.save();
-      ctx.lineWidth = 1;
-      const scroll = (time * 0.35) % 1;
-      for (let i = 1; i <= 16; i++) {
-        const k = (i - scroll) / 16;
-        if (k <= 0) continue;
-        const y = hy + Math.pow(k, 2.3) * (height - hy) * 1.9;
-        if (y > height + 2) continue;
-        ctx.strokeStyle = "rgba(0,229,255," + (0.22 * (1 - k) + 0.04) + ")";
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y);
-        ctx.stroke();
-      }
-      const vpx = width * 0.5 - px * 60;
-      for (let i = -14; i <= 14; i++) {
-        const spread = i * width * 0.12;
-        ctx.strokeStyle = "rgba(255,45,149," + Math.max(0.03, 0.2 - Math.abs(i) * 0.012) + ")";
-        ctx.beginPath();
-        ctx.moveTo(vpx, hy);
-        ctx.lineTo(vpx + spread * 2.4, height);
-        ctx.stroke();
-      }
-      ctx.strokeStyle = "rgba(0,229,255,0.45)";
-      ctx.lineWidth = 1.4;
-      ctx.beginPath();
-      ctx.moveTo(0, hy);
-      ctx.lineTo(width, hy);
-      ctx.stroke();
-      ctx.restore();
-
-      /* ---- NEURAL NETWORK: THE BIRTH ---- */
-      const cx = width * 0.5;
-      const cy = height * 0.44;
-      const pulse = 0.5 + 0.5 * Math.sin(time * 0.7);
-
-      ctx.save();
-      ctx.globalCompositeOperation = "lighter";
-
-      // Drifting nodes, gently orbiting the core and pushed by the cursor
-      for (const n of nodes) {
-        if (!prefersReduced) {
-          n.x += n.vx * n.depth;
-          n.y += n.vy * n.depth;
-
-          const dcx = n.x - cx;
-          const dcy = n.y - cy;
-          const dc = Math.sqrt(dcx * dcx + dcy * dcy) || 1;
-          n.vx -= (dcx / dc) * 0.0022 * (dc / (width * 0.5));
-          n.vy -= (dcy / dc) * 0.0022 * (dc / (height * 0.5));
-
-          const mdx = n.x - mx * width;
-          const mdy = n.y - my * height;
-          const md = Math.sqrt(mdx * mdx + mdy * mdy) || 1;
-          if (md < 260) {
-            const push = ((260 - md) / 260) * (0.5 + vel * 2.6);
-            n.vx += (mdx / md) * push * 0.09;
-            n.vy += (mdy / md) * push * 0.09;
-          }
-
-          n.vx *= 0.985;
-          n.vy *= 0.985;
-        }
-
-        if (n.x < -40) n.x = width + 40;
-        if (n.x > width + 40) n.x = -40;
-        if (n.y < -40) n.y = height + 40;
-        if (n.y > height + 40) n.y = -40;
-      }
-
-      // Synapses
-      ctx.lineWidth = 0.9;
-      for (let i = 0; i < nodes.length; i++) {
-        const a = nodes[i];
-        for (let j = i + 1; j < nodes.length; j++) {
-          const b = nodes[j];
-          const dx = a.x - b.x;
-          const dy = a.y - b.y;
-          const d2 = dx * dx + dy * dy;
-          if (d2 > LINK_DIST * LINK_DIST) continue;
-          const d = Math.sqrt(d2);
-          const fade = 1 - d / LINK_DIST;
-          const tint = (a.y / height) * 0.85 + 0.08;
-          ctx.strokeStyle = duotone(tint, fade * 0.26);
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-          ctx.stroke();
+      // Pull the current video frame onto the GPU
+      let hasVideo = 0;
+      if (video && videoReady && video.readyState >= 2) {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, videoTex);
+        try {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+          hasVideo = 1;
+        } catch {
+          hasVideo = 0;
         }
       }
 
-      // Travelling impulses - the network thinking
-      for (const s of signals) {
-        const a = nodes[s.a];
-        const b = nodes[s.b];
-        if (!a || !b) continue;
-        if (!prefersReduced) s.t += s.speed;
-        if (s.t > 1) {
-          s.t = 0;
-          s.a = s.b;
-          s.b = Math.floor(Math.random() * nodes.length);
-        }
-        const sx = a.x + (b.x - a.x) * s.t;
-        const sy = a.y + (b.y - a.y) * s.t;
-        const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, 16);
-        glow.addColorStop(0, "rgba(255,255,255,0.95)");
-        glow.addColorStop(0.3, duotone(sy / height, 0.6));
-        glow.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = glow;
-        ctx.beginPath();
-        ctx.arc(sx, sy, 16, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, videoTex);
+      gl.uniform1i(U.video, 0);
 
-      // Node cores
-      for (const n of nodes) {
-        const tw = 0.55 + 0.45 * Math.sin(time * 1.6 + n.phase);
-        const rr = n.r * (0.8 + tw * 0.6);
-        ctx.fillStyle = duotone(n.y / height, 0.5 + tw * 0.45);
-        ctx.beginPath();
-        ctx.arc(n.x, n.y, rr, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, faceTex);
+      gl.uniform1i(U.face, 1);
 
-      // The core igniting + expanding consciousness rings
-      const coreR = 230 + pulse * 60;
-      const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
-      core.addColorStop(0, "rgba(255,255,255," + (0.26 + pulse * 0.16) + ")");
-      core.addColorStop(0.18, "rgba(255,45,149," + (0.2 + pulse * 0.1) + ")");
-      core.addColorStop(0.55, "rgba(0,229,255,0.10)");
-      core.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = core;
-      ctx.beginPath();
-      ctx.arc(cx, cy, coreR, 0, Math.PI * 2);
-      ctx.fill();
+      gl.uniform2f(U.res, canvas.width, canvas.height);
+      gl.uniform2f(U.videoRes, videoW, videoH);
+      gl.uniform2f(U.mouse, mx, my);
+      gl.uniform1f(U.time, t);
+      gl.uniform1f(U.velocity, vel);
+      gl.uniform1f(U.hasVideo, hasVideo);
+      gl.uniform1f(U.boxW, boxW);
+      gl.uniform1f(U.boxH, faceLoaded ? boxH : 0.0001);
 
-      ctx.lineWidth = 1.2;
-      for (let i = 0; i < 3; i++) {
-        const t = (time * 0.22 + i / 3) % 1;
-        const rad = t * Math.max(width, height) * 0.55;
-        ctx.strokeStyle = "rgba(0,229,255," + (1 - t) * 0.26 + ")";
-        ctx.beginPath();
-        ctx.arc(cx, cy, rad, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.strokeStyle = "rgba(255,45,149," + (1 - t) * 0.18 + ")";
-        ctx.beginPath();
-        ctx.arc(cx, cy, rad * 0.82, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-
-      ctx.restore();
-
-      /* ---- CRT SCANLINES + VIGNETTE ---- */
-      ctx.save();
-      ctx.globalAlpha = 0.16;
-      ctx.fillStyle = "#000";
-      for (let y = 0; y < height; y += 3) ctx.fillRect(0, y, width, 1);
-      ctx.restore();
-
-      const vig = ctx.createRadialGradient(
-        width * 0.5,
-        height * 0.5,
-        Math.min(width, height) * 0.25,
-        width * 0.5,
-        height * 0.5,
-        Math.max(width, height) * 0.78
-      );
-      vig.addColorStop(0, "rgba(0,0,0,0)");
-      vig.addColorStop(1, "rgba(0,0,0,0.72)");
-      ctx.fillStyle = vig;
-      ctx.fillRect(0, 0, width, height);
-
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
       raf = requestAnimationFrame(render);
     };
-
     raf = requestAnimationFrame(render);
 
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", resize);
+      if (video) {
+        video.removeEventListener("loadeddata", onVideoReady);
+        video.removeEventListener("playing", onVideoReady);
+      }
+      gl.deleteProgram(program);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      gl.deleteTexture(videoTex);
+      gl.deleteTexture(faceTex);
+      gl.deleteBuffer(buf);
     };
   }, []);
 
@@ -418,56 +480,62 @@ export default function InteractiveHeroLens() {
       onTouchMove={handleMouseMove}
       className="relative w-full h-screen min-h-screen overflow-hidden select-none bg-black cursor-crosshair"
     >
-      {/* ---------------- GENERATED FIELD (pre-roll only, fades out under the clip) ---------------- */}
-      <canvas
-        ref={canvasRef}
-        className={
-          "absolute inset-0 w-full h-full pointer-events-none z-10 transition-opacity duration-700 " +
-          (videoReady ? "opacity-0" : "opacity-100")
-        }
+      {/* Source clip: decoded off-screen and sampled into the shader each frame */}
+      <video
+        ref={videoRef}
+        className="absolute inset-0 w-full h-full object-cover opacity-0 pointer-events-none"
+        src={VIDEO_SRC}
+        autoPlay
+        muted
+        loop
+        playsInline
+        preload="auto"
+        aria-hidden="true"
       />
 
-      {/* ---------------- THE HERO CLIP: full-bleed, ungraded, exactly as authored ---------------- */}
-      {hasVideo && videoSrc && (
-        <video
-          key={videoSrc}
-          className={
-            "absolute inset-0 w-full h-full object-cover pointer-events-none z-[11] transition-opacity duration-700 " +
-            (videoReady ? "opacity-100" : "opacity-0")
-          }
-          src={videoSrc}
-          poster={hasPoster ? POSTER_SRC : undefined}
-          autoPlay
-          muted
-          loop
-          playsInline
-          preload="auto"
-          onPlaying={markVideoReady}
-          onCanPlay={markVideoReady}
-          onError={() => {
-            videoReadyRef.current = false;
-            setVideoReady(false);
-            setHasVideo(false);
-          }}
-        />
+      {/* The composite: mask + face, resolved on the GPU */}
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 w-full h-full pointer-events-none z-10"
+      />
+
+      {/* Plain fallback if WebGL is unavailable */}
+      {glFailed && (
+        <div className="absolute inset-0 z-10">
+          <video
+            className="absolute inset-0 w-full h-full object-cover"
+            src={VIDEO_SRC}
+            autoPlay
+            muted
+            loop
+            playsInline
+          />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={FACE_SRC}
+            alt="Evans Rwothomio"
+            className="absolute left-1/2 top-1/2 h-[90%] -translate-x-1/2 -translate-y-1/2 object-contain mix-blend-screen opacity-80"
+            style={{
+              WebkitMaskImage:
+                "radial-gradient(ellipse 46% 52% at 50% 43%, #000 55%, transparent 100%)",
+              maskImage:
+                "radial-gradient(ellipse 46% 52% at 50% 43%, #000 55%, transparent 100%)",
+            }}
+          />
+        </div>
       )}
 
-      {/* ---------------- LEGIBILITY SCRIMS ONLY (no colour grade over the footage) ---------------- */}
+      {/* Legibility scrims */}
       <div className="absolute inset-x-0 top-0 h-32 z-[12] pointer-events-none bg-gradient-to-b from-black/70 to-transparent" />
-      <div className="absolute inset-x-0 bottom-0 h-[60%] z-[12] pointer-events-none bg-gradient-to-t from-black/90 via-black/45 to-transparent" />
+      <div className="absolute inset-x-0 bottom-0 h-[45%] z-[12] pointer-events-none bg-gradient-to-t from-black/90 via-black/35 to-transparent" />
 
-      {/* ---------------- SEAMLESS FULL-BLEED BOTTOM TRANSITION ---------------- */}
-      <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-black via-black/40 to-transparent pointer-events-none z-20" />
-
-      {/* ---------------- TOP SUBTLE NAVIGATION BAR (ARTIFACT HUD) ---------------- */}
+      {/* ---------------- TOP HUD ---------------- */}
       <header className="absolute top-6 left-6 right-6 z-40 flex items-center justify-between text-xs font-mono uppercase tracking-widest text-zinc-400 pointer-events-auto">
         <div className="flex items-center gap-3 bg-black/60 backdrop-blur-md px-4 py-2 rounded-full border border-white/10 shadow-xl">
           <span className="w-2 h-2 rounded-full bg-fuchsia-400 animate-pulse" />
           <span className="text-white font-bold tracking-wider">EVANS RWOTHOMIO</span>
           <span className="text-zinc-500">/</span>
-          <span className="text-cyan-400 hidden sm:inline">
-            {hasVideo ? "BIRTH OF A.I. [FOOTAGE]" : "BIRTH OF A.I. [GENERATED]"}
-          </span>
+          <span className="text-cyan-400 hidden sm:inline">SIGNAL ACQUIRED</span>
         </div>
 
         <div className="flex items-center gap-3">
@@ -486,31 +554,9 @@ export default function InteractiveHeroLens() {
         </div>
       </header>
 
-      {/* ---------------- MASTER ARTIFACT TYPOGRAPHY ---------------- */}
-      <div className="absolute left-6 sm:left-12 md:left-16 lg:left-24 bottom-16 sm:bottom-20 md:bottom-24 z-30 max-w-4xl pointer-events-auto">
-        {/* Status Pill Badge */}
-        <div className="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-full bg-black/70 backdrop-blur-md border border-fuchsia-400/40 text-fuchsia-300 text-[11px] sm:text-xs font-mono uppercase tracking-widest mb-6 shadow-2xl">
-          <Sparkles className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
-          <span>Birth of Artificial Intelligence</span>
-        </div>
-
-        {/* Cinematic Header */}
-        <h1 className="font-extrabold text-3xl sm:text-4xl md:text-5xl lg:text-6xl text-white uppercase tracking-tight leading-[0.95] drop-shadow-[0_6px_25px_rgba(0,0,0,0.95)] select-none">
-          EXP<span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-fuchsia-500">LO</span>RE<br />
-          WHAT&apos;S<br />
-          <span className="relative inline-block">
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-400 via-rose-400 to-cyan-400">P</span>OSSIBLE
-          </span>
-        </h1>
-
-        {/* Minimalist Subtitle */}
-        <p className="mt-5 sm:mt-7 text-zinc-300 font-medium text-xs sm:text-sm md:text-base max-w-lg drop-shadow-lg leading-relaxed">
-          A synthwave neural core igniting in real time. Move your cursor through the
-          field to disturb the synapses and watch the network re-form.
-        </p>
-
-        {/* Call to Action Bar */}
-        <div className="mt-7 flex flex-wrap items-center gap-4">
+      {/* ---------------- CTA ---------------- */}
+      <div className="absolute left-6 sm:left-12 md:left-16 lg:left-24 bottom-16 sm:bottom-20 md:bottom-24 z-30 pointer-events-auto">
+        <div className="flex flex-wrap items-center gap-4">
           <button
             onClick={scrollToStory}
             className="px-7 sm:px-9 py-3.5 sm:py-4 rounded-full bg-white text-zinc-950 font-bold text-xs sm:text-sm uppercase tracking-wider hover:bg-cyan-400 hover:text-black transition-all duration-300 shadow-2xl shadow-fuchsia-500/25 flex items-center gap-2.5 group cursor-pointer"
@@ -526,13 +572,13 @@ export default function InteractiveHeroLens() {
                 (mouseVelocity > 0.15 ? "bg-fuchsia-400 animate-ping" : "bg-cyan-400")
               }
             />
-            <span className="hidden sm:inline">Neural field active</span>
-            <span className="sm:hidden">Swipe the field</span>
+            <span className="hidden sm:inline">Move to resolve</span>
+            <span className="sm:hidden">Swipe to resolve</span>
           </div>
         </div>
       </div>
 
-      {/* ---------------- BOTTOM RIGHT WATERMARK / HUD ---------------- */}
+      {/* ---------------- BOTTOM RIGHT HUD ---------------- */}
       <div className="absolute right-6 sm:right-12 bottom-8 sm:bottom-12 z-30 hidden md:flex flex-col items-end pointer-events-none text-right font-mono">
         <span className="text-[11px] text-cyan-400 uppercase tracking-widest font-semibold">
           {"// FUTURISTIC / SYNTHWAVE / DUOTONE"}
@@ -545,7 +591,7 @@ export default function InteractiveHeroLens() {
         </span>
       </div>
 
-      {/* ---------------- FLOATING BOTTOM CENTER SCROLL INDICATOR ---------------- */}
+      {/* ---------------- SCROLL INDICATOR ---------------- */}
       <button
         onClick={scrollToStory}
         aria-label="Scroll to main content"
