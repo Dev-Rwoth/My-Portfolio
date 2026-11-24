@@ -77,7 +77,7 @@ export default function TechnicalArsenal() {
         <div>
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 text-purple-300 text-xs font-mono border border-purple-500/20 mb-4">
             <Atom className="w-3.5 h-3.5 text-cyan-400" />
-            // ORBITAL TECH GALAXY
+            {"// ORBITAL TECH GALAXY"}
           </div>
           <h2 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-black tracking-tight text-white uppercase">
             TECHNICAL <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-400 to-purple-500">ARSENAL</span>

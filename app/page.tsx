@@ -9,8 +9,6 @@ import { Github, Linkedin } from "@/components/Icons";
 import { 
   Mail, 
   Check,
-  ExternalLink, 
-  FolderGit2,
   GraduationCap,
   BookOpen,
   School,
@@ -224,7 +222,7 @@ export default function Home() {
                   
                   <div className="flex items-center justify-between">
                     <span className="font-pixel text-[10px] text-amber-400 uppercase tracking-widest">
-                      // CORE DISCIPLINES &amp; SYSTEMS
+                      {"// CORE DISCIPLINES & SYSTEMS"}
                     </span>
                     <span className="font-retro-mono text-zinc-500 text-xs">
                       5 CAPABILITIES

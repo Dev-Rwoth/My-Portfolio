@@ -1,26 +1,22 @@
 "use client";
 
 import React, { useState } from "react";
-import { 
-  FolderGit2, 
-  ExternalLink, 
-  Globe, 
-  Terminal, 
-  Cpu, 
-  Layers, 
-  Sparkles, 
+import {
+  FolderGit2,
+  ExternalLink,
+  Layers,
+  Sparkles,
   ArrowUpRight,
-  Radio,
-  Workflow,
-  HeartHandshake
 } from "lucide-react";
 import { Github } from "@/components/Icons";
+
+type ProjectCategory = "all" | "web" | "web3" | "cloud" | "ai";
 
 interface Project {
   id: string;
   title: string;
   categoryTag: string;
-  category: "all" | "web" | "web3" | "cloud" | "ai";
+  category: ProjectCategory;
   description: string;
   highlights: string;
   tags: string[];
@@ -174,14 +170,13 @@ const PROJECTS_DATA: Project[] = [
 ];
 
 export default function ProjectsSection() {
-  const [filter, setFilter] = useState<"all" | "web" | "web3" | "cloud" | "ai">("all");
+  const [filter, setFilter] = useState<ProjectCategory>("all");
 
   const filteredProjects = PROJECTS_DATA.filter((project) => {
     if (filter === "all") return true;
     return project.category === filter;
   });
 
-  const featuredProjects = PROJECTS_DATA.filter((p) => p.isFeatured);
 
   return (
     <section id="projects" className="w-full py-8 md:py-16 relative">
@@ -476,7 +471,7 @@ export default function ProjectsSection() {
             ].map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => setFilter(tab.id as any)}
+                onClick={() => setFilter(tab.id as ProjectCategory)}
                 className={`px-3 py-1.5 rounded-full text-xs font-mono transition-all duration-200 cursor-pointer ${
                   filter === tab.id
                     ? "bg-white text-zinc-950 font-bold shadow-md shadow-white/10"
