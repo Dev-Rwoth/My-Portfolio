@@ -198,3 +198,54 @@ body {
 .pause-on-hover:hover * {
   animation-play-state: paused;
 }
+
+/* Resonance ring: springs from the core out to the focused orbit */
+@keyframes resonance {
+  0% {
+    transform: scale(0.08);
+    opacity: 0;
+  }
+  35% {
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0.18;
+  }
+}
+
+.resonance {
+  animation: resonance 900ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Core readout swap */
+@keyframes core-swap {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+.core-swap {
+  animation: core-swap 420ms ease-out;
+}
+
+/* The orbits spin indefinitely; respect a reduced-motion preference. */
+@media (prefers-reduced-motion: reduce) {
+  .orbit-ring-1,
+  .orbit-ring-2,
+  .orbit-ring-3,
+  .orbit-counter-1,
+  .orbit-counter-2,
+  .orbit-counter-3,
+  .resonance,
+  .core-swap {
+    animation: none;
+  }
+}
