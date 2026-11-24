@@ -4,25 +4,46 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { ArrowDown } from "lucide-react";
 
 /**
- * HERO - "The machine dreams a face."
+ * HERO - the face welded into the mask.
  *
- * The AI motion graphic (public/hero-ai.mp4) is the mask. Evans' portrait
- * (public/evans-portrait.png) is composited INTO it on the GPU so the face
- * is never a photo pasted on top - it materialises out of the data stream:
+ * This is deliberately NOT "photo layered over video". Two things make the
+ * face and the mask read as a single image:
  *
- *   - the face resolves where the clip is energetic (bright data = more face)
- *   - a scan sweep travels up the frame, printing the face as it passes
- *   - the cursor is a clarity lens that parts the mask and sharpens the face
- *   - where the mask wins, the face smears along a flow field and splits into
- *     RGB fringes, so it dissolves back into the stream instead of cutting off
+ *  1. ONE shared warp field. Breathing scale, drift, flow-noise and the
+ *     cursor parallax are computed once into `pUv`, and BOTH the clip and the
+ *     portrait are sampled through it. They cannot drift apart - if the mask
+ *     moves, the face moves with it, locked.
  *
- * The portrait's white studio background is keyed out in-shader (luma + low
- * saturation) and softened by an elliptical falloff, so there is no visible
- * photo rectangle - only the head emerging.
+ *  2. The face is rebuilt FROM the mask's own pixels. The portrait is used as
+ *     a shading/emboss field that reshapes the clip's colour, not as colour
+ *     pasted on top. Only FACE_SKIN of real skin tone is mixed back so he
+ *     stays recognisable. Every lit pixel of the face is literally mask data.
+ *
+ * On top of that the clip's luminance gradient pushes the face around, so the
+ * mask's moving structures ripple through the portrait as they pass.
+ *
+ * The eye glow is anchored to the PORTRAIT's eye coordinates (EYE_L / EYE_R
+ * below), so the light provably originates at his eyes and the mask's glow
+ * reads as emitted from them.
+ *
+ * ---------------------------------------------------------------------------
+ * TUNING - these are the only numbers you should need to touch:
+ *   FACE_CENTER  where the portrait sits on screen (x, y; 0..1, y down)
+ *   FACE_SCALE   portrait height as a fraction of viewport height
+ *   EYE_L/EYE_R  eye centres in PORTRAIT space (0..1 of the image)
+ *   FACE_SKIN    0 = face is pure mask data, 1 = full photo colour
+ * Nudge FACE_CENTER / FACE_SCALE to line his eyes up with the mask's eyes.
+ * ---------------------------------------------------------------------------
  */
 
-const VIDEO_SRC = "/hero-ai.mp4";
+const VIDEO_SRC = "/hero-mask.mp4";
 const FACE_SRC = "/evans-portrait.png";
+
+const FACE_CENTER = { x: 0.5, y: 0.46 };
+const FACE_SCALE = 1.02;
+const EYE_L = { x: 0.375, y: 0.42 };
+const EYE_R = { x: 0.625, y: 0.42 };
+const FACE_SKIN = 0.26;
 
 const VERT = `
 attribute vec2 a_position;
@@ -48,8 +69,11 @@ uniform float u_velocity;
 uniform float u_hasVideo;
 uniform float u_boxW;
 uniform float u_boxH;
+uniform vec2  u_faceCenter;
+uniform vec2  u_eyeL;
+uniform vec2  u_eyeR;
+uniform float u_skin;
 
-/* ---- simplex noise ---- */
 vec3 mod289(vec3 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
 vec2 mod289(vec2 x){ return x - floor(x * (1.0/289.0)) * 289.0; }
 vec3 permute(vec3 x){ return mod289(((x*34.0)+1.0)*x); }
@@ -82,10 +106,8 @@ float fbm(vec2 p){
   v += 0.1250 * snoise(p);
   return v;
 }
-
 float luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
 
-/* object-fit: cover */
 vec2 coverUv(vec2 uv, vec2 screenRes, vec2 imgRes){
   float sA = screenRes.x / screenRes.y;
   float iA = imgRes.x / imgRes.y;
@@ -95,100 +117,147 @@ vec2 coverUv(vec2 uv, vec2 screenRes, vec2 imgRes){
   return c;
 }
 
+vec3 sampleMask(vec2 p){
+  vec2 vUv = coverUv(p, u_res, u_videoRes);
+  return texture2D(u_video, vUv).rgb;
+}
+
 void main(){
   float sA = u_res.x / u_res.y;
   float t  = u_time;
 
-  /* ---------------- THE MASK: the AI clip ---------------- */
+  /* =====================================================================
+     ONE SHARED WARP - everything downstream samples through pUv, so the
+     mask and the face are welded into a single moving image.
+     ===================================================================== */
   vec2 flow = vec2(
-    fbm(v_uv * 3.0 + vec2( t * 0.10, t * 0.07)),
-    fbm(v_uv * 3.0 + vec2(-t * 0.09, t * 0.11))
+    fbm(v_uv * 2.6 + vec2( t * 0.09,  t * 0.06)),
+    fbm(v_uv * 2.6 + vec2(-t * 0.08,  t * 0.10))
   );
 
-  vec2 vUv = coverUv(v_uv, u_res, u_videoRes);
-  vec3 videoCol = texture2D(u_video, vUv).rgb;
+  float breathe = 1.0 + sin(t * 0.50) * 0.022;
+  vec2  drift   = vec2(sin(t * 0.21), cos(t * 0.17)) * 0.010;
+  vec2  parallax = (u_mouse - 0.5) * 0.030;
 
-  // Procedural synthwave nebula: carries the look before the clip decodes
+  vec2 pUv = (v_uv - 0.5) / breathe + 0.5;
+  pUv += drift + flow * 0.016 + parallax;
+
+  /* ---------------- THE MASK ---------------- */
+  vec3 maskCol = sampleMask(pUv);
+
   float neb = fbm(v_uv * 2.4 + flow * 0.5 + vec2(t * 0.05, -t * 0.04));
-  vec3 proc = mix(vec3(0.03, 0.00, 0.09), vec3(0.22, 0.03, 0.38), neb * 0.5 + 0.5);
-  proc += vec3(0.00, 0.35, 0.55) * pow(max(0.0, 1.0 - length(v_uv - vec2(0.5, 0.45)) * 1.8), 3.0) * 0.5;
+  vec3 proc = mix(vec3(0.03, 0.00, 0.09), vec3(0.20, 0.03, 0.36), neb * 0.5 + 0.5);
+  proc += vec3(0.0, 0.32, 0.52) * pow(max(0.0, 1.0 - length(v_uv - vec2(0.5,0.45)) * 1.8), 3.0) * 0.5;
 
-  vec3 base = mix(proc, videoCol, u_hasVideo);
-  float energy = luma(base);
+  vec3 base = mix(proc, maskCol, u_hasVideo);
 
-  /* ---------------- THE PORTRAIT BOX ---------------- */
-  vec2 faceCenter = vec2(0.5, 0.47);
-  vec2 fUv = (v_uv - faceCenter) / vec2(u_boxW, u_boxH) + 0.5;
+  /* ---------------- MASK-DRIVEN PUSH ----------------
+     The clip's luminance gradient shoves the face, so the mask's moving
+     structures ripple through the portrait as they travel across it.      */
+  vec2 px = vec2(1.6 / u_res.x, 1.6 / u_res.y);
+  float lx1 = luma(sampleMask(pUv + vec2(px.x, 0.0)));
+  float lx0 = luma(sampleMask(pUv - vec2(px.x, 0.0)));
+  float ly1 = luma(sampleMask(pUv + vec2(0.0, px.y)));
+  float ly0 = luma(sampleMask(pUv - vec2(0.0, px.y)));
+  vec2 maskPush = vec2(lx1 - lx0, ly1 - ly0) * 0.055;
 
-  /* ---------------- THE REVEAL MASK ---------------- */
-  float dMouse = length((v_uv - u_mouse) * vec2(sA, 1.0));
-  float lens   = 1.0 - smoothstep(0.08, 0.46, dMouse);
+  /* ---------------- THE PORTRAIT, IN THE SAME SPACE ---------------- */
+  vec2 fUv = (pUv - u_faceCenter) / vec2(u_boxW, u_boxH) + 0.5;
+  fUv += maskPush;
 
-  float grain  = fbm(v_uv * 3.6 + vec2(t * 0.08, -t * 0.06)) * 0.5 + 0.5;
-  float breath = 0.5 + 0.5 * sin(t * 0.55);
-
-  // Printing sweep: travels up the frame, resolving the face as it passes
-  float scanY = fract(t * 0.13);
-  float scan  = exp(-abs(v_uv.y - scanY) * 7.0);
-
-  float reveal = 0.42
-               + energy * 0.40
-               + grain  * 0.18
-               + lens   * 0.45
-               + breath * 0.10
-               + scan   * 0.30;
-  reveal = smoothstep(0.38, 0.74, reveal);
-
-  /* ---------------- SAMPLE THE FACE ---------------- */
-  // Where the mask wins, the face smears along the flow field
-  vec2 fUvD = fUv + flow * (1.0 - reveal) * 0.055;
-
-  // RGB dispersion: strongest at the dissolving edges and under fast cursor motion
-  float ca = 0.0035 + u_velocity * 0.012 + (1.0 - reveal) * 0.010;
+  float ca = 0.0030 + u_velocity * 0.010;
   vec3 faceCol;
-  faceCol.r = texture2D(u_face, fUvD + vec2(ca, 0.0)).r;
-  faceCol.g = texture2D(u_face, fUvD).g;
-  faceCol.b = texture2D(u_face, fUvD - vec2(ca, 0.0)).b;
+  faceCol.r = texture2D(u_face, fUv + vec2(ca, 0.0)).r;
+  faceCol.g = texture2D(u_face, fUv).g;
+  faceCol.b = texture2D(u_face, fUv - vec2(ca, 0.0)).b;
 
-  /* ---------------- KEY OUT THE WHITE STUDIO BACKDROP ---------------- */
+  /* ---------------- KEY THE WHITE STUDIO BACKDROP ---------------- */
   float fl  = luma(faceCol);
   float mx  = max(faceCol.r, max(faceCol.g, faceCol.b));
   float mn  = min(faceCol.r, min(faceCol.g, faceCol.b));
   float sat = mx - mn;
-
-  // bright + desaturated => backdrop, drop it
   float keyA = 1.0 - smoothstep(0.60, 0.88, fl) * (1.0 - smoothstep(0.09, 0.24, sat));
 
-  // elliptical falloff centred on the head, so nothing reads as a photo edge
   vec2  e   = (fUv - vec2(0.5, 0.43)) / vec2(0.47, 0.52);
-  float ell = 1.0 - smoothstep(0.74, 1.04, length(e));
+  float ell = 1.0 - smoothstep(0.72, 1.04, length(e));
 
-  // stay inside the portrait box
-  vec2 inside = step(vec2(0.0), fUvD) * step(fUvD, vec2(1.0));
-  float faceAlpha = keyA * ell * inside.x * inside.y;
+  vec2 inB = step(vec2(0.0), fUv) * step(fUv, vec2(1.0));
+  float faceAlpha = keyA * ell * inB.x * inB.y;
 
-  /* ---------------- GRADE THE FACE INTO THE PALETTE ---------------- */
-  vec3 duo = mix(vec3(0.16, 0.02, 0.30), vec3(0.58, 0.93, 1.0), fl);
-  vec3 graded = mix(faceCol * 1.12, duo, 0.38);
-  // let the data stream glow through the skin
-  graded += base * 0.18;
+  /* ---------------- PRESENCE ----------------
+     Kept high and steady: he is embedded in the mask, not flickering in
+     and out of it. The cursor only adds local clarity.                    */
+  float dMouse = length((v_uv - u_mouse) * vec2(sA, 1.0));
+  float lens   = 1.0 - smoothstep(0.10, 0.50, dMouse);
+  float grain  = fbm(v_uv * 3.4 + vec2(t * 0.07, -t * 0.05)) * 0.5 + 0.5;
+  float breath = 0.5 + 0.5 * sin(t * 0.55);
 
-  /* ---------------- COMPOSITE ---------------- */
-  float m = reveal * faceAlpha;
-  vec3 color = mix(base, graded, m);
+  float presence = 0.74 + grain * 0.10 + lens * 0.22 + breath * 0.05;
+  presence = clamp(presence, 0.0, 1.0);
 
-  // Materialising fringe where the face is half-resolved
-  float edge = pow(1.0 - abs(reveal * 2.0 - 1.0), 3.0);
-  vec3 fringe = mix(vec3(1.0, 0.18, 0.60), vec3(0.10, 0.90, 1.0), grain);
-  color += fringe * edge * faceAlpha * 0.55;
+  /* =====================================================================
+     FUSE: rebuild the face OUT OF the mask's pixels.
+     'emboss' is the portrait's shading; it reshapes the clip's own colour,
+     so every lit pixel of the face is mask data, not photo data.
+     ===================================================================== */
+  float emboss = fl - 0.48;
 
-  // Rim light tracing the keyed silhouette
-  float rim = pow(1.0 - abs(faceAlpha * 2.0 - 1.0), 4.0) * reveal;
-  color += mix(vec3(0.05, 0.85, 1.0), vec3(1.0, 0.25, 0.70), breath) * rim * 0.40;
+  vec3 fused = base * (1.0 + emboss * 2.3);
+  fused += base * pow(max(fl - 0.44, 0.0), 1.4) * 1.5;
+  fused += vec3(0.10, 0.55, 0.85) * max(emboss, 0.0) * 0.45;
+
+  // a little true skin so he stays recognisably himself
+  fused = mix(fused, faceCol * 1.06, u_skin);
+
+  float m = presence * faceAlpha;
+  vec3 color = mix(base, fused, m);
+
+  /* ---------------- SILHOUETTE RIM ---------------- */
+  float rim = pow(1.0 - abs(faceAlpha * 2.0 - 1.0), 4.0) * presence;
+  color += mix(vec3(0.05, 0.85, 1.0), vec3(1.0, 0.25, 0.70), breath) * rim * 0.38;
+
+  /* =====================================================================
+     EYE EMISSION - anchored to the PORTRAIT's eyes, so the glow provably
+     originates from his eyes and the mask's light reads as coming out of
+     them. Drawn additively and NOT gated by the ellipse falloff, so the
+     eyes stay the brightest point of the whole frame.
+     ===================================================================== */
+  // portrait-space -> screen-space scale, so the glow stays circular
+  vec2 eyeScale = vec2(u_boxW * sA, u_boxH);
+
+  float pulse = 0.72 + 0.28 * sin(t * 1.9);
+  float flick = 0.92 + 0.08 * fbm(vec2(t * 2.4, 0.0));
+  float ePow  = pulse * flick;
+
+  vec2 dLv = (fUv - u_eyeL) * eyeScale;
+  vec2 dRv = (fUv - u_eyeR) * eyeScale;
+  float dL = length(dLv);
+  float dR = length(dRv);
+  float dE = min(dL, dR);
+
+  float inFace = inB.x * inB.y;
+
+  // tight core + wide bloom
+  float core  = exp(-dE * dE * 2600.0) * 1.20;
+  float bloom = exp(-dE * dE * 120.0)  * 0.55;
+  float halo  = exp(-dE * 7.0)         * 0.22;
+
+  // horizontal anamorphic streak through the eye line
+  float useL   = step(dL, dR);
+  vec2  dS     = mix(dRv, dLv, useL);
+  float streak = exp(-abs(dS.x) * 9.0) * exp(-abs(dS.y) * 150.0) * 0.45;
+
+  float emit = (core + bloom + halo + streak) * ePow * inFace;
+
+  // tint the emission with the mask's own light at the eye, so the glow
+  // belongs to the clip rather than being a separate coloured lamp
+  vec3 eyeLight = base * 1.4 + vec3(0.35, 0.85, 1.0);
+  color += eyeLight * emit;
+  color += vec3(1.0) * core * ePow * inFace * 0.5;
 
   /* ---------------- CRT FINISH ---------------- */
   float sl = sin(v_uv.y * u_res.y * 1.5) * 0.5 + 0.5;
-  color *= 1.0 - sl * 0.055;
+  color *= 1.0 - sl * 0.05;
 
   float vig = length(v_uv - 0.5);
   color *= 1.0 - smoothstep(0.42, 0.95, vig) * 0.55;
@@ -317,11 +386,14 @@ export default function InteractiveHeroLens() {
       hasVideo: gl.getUniformLocation(program, "u_hasVideo"),
       boxW: gl.getUniformLocation(program, "u_boxW"),
       boxH: gl.getUniformLocation(program, "u_boxH"),
+      faceCenter: gl.getUniformLocation(program, "u_faceCenter"),
+      eyeL: gl.getUniformLocation(program, "u_eyeL"),
+      eyeR: gl.getUniformLocation(program, "u_eyeR"),
+      skin: gl.getUniformLocation(program, "u_skin"),
     };
 
-    // The vertex shader already flips v so that v_uv is top-left origin, which
-    // matches the default upload order (row 0 = top of image). Flipping here as
-    // well would invert both the clip and the portrait.
+    // The vertex shader already flips v (top-left origin), which matches the
+    // default upload order. Flipping here too would invert both textures.
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
 
     const makeTex = () => {
@@ -348,7 +420,6 @@ export default function InteractiveHeroLens() {
     const videoTex = makeTex();
     const faceTex = makeTex();
 
-    // Portrait aspect drives the box; refined once the PNG reports its size
     let faceAspect = 765 / 1024;
     let faceLoaded = false;
 
@@ -363,12 +434,11 @@ export default function InteractiveHeroLens() {
     };
 
     let boxW = 0.42;
-    let boxH = 1.0;
+    let boxH = FACE_SCALE;
 
-    // Fit the portrait: full height where there is room, shrunk on narrow screens
     const sizeBox = () => {
       const sAspect = canvas.width / Math.max(1, canvas.height);
-      boxH = 1.02;
+      boxH = FACE_SCALE;
       boxW = (boxH * faceAspect) / sAspect;
       if (boxW > 0.88) {
         boxW = 0.88;
@@ -376,15 +446,13 @@ export default function InteractiveHeroLens() {
       }
     };
 
-    let width = 0;
-    let height = 0;
     const resize = () => {
       const el = containerRef.current;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      width = el ? el.clientWidth : window.innerWidth;
-      height = el ? el.clientHeight : window.innerHeight;
-      canvas.width = Math.floor(width * dpr);
-      canvas.height = Math.floor(height * dpr);
+      const w = el ? el.clientWidth : window.innerWidth;
+      const h = el ? el.clientHeight : window.innerHeight;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
       gl.viewport(0, 0, canvas.width, canvas.height);
       sizeBox();
     };
@@ -421,7 +489,6 @@ export default function InteractiveHeroLens() {
       vel += (mouseRef.current.speed - vel) * 0.1;
       mouseRef.current.speed *= 0.94;
 
-      // Pull the current video frame onto the GPU
       let hasVideo = 0;
       if (video && videoReady && video.readyState >= 2) {
         gl.activeTexture(gl.TEXTURE0);
@@ -450,6 +517,10 @@ export default function InteractiveHeroLens() {
       gl.uniform1f(U.hasVideo, hasVideo);
       gl.uniform1f(U.boxW, boxW);
       gl.uniform1f(U.boxH, faceLoaded ? boxH : 0.0001);
+      gl.uniform2f(U.faceCenter, FACE_CENTER.x, FACE_CENTER.y);
+      gl.uniform2f(U.eyeL, EYE_L.x, EYE_L.y);
+      gl.uniform2f(U.eyeR, EYE_R.x, EYE_R.y);
+      gl.uniform1f(U.skin, FACE_SKIN);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       raf = requestAnimationFrame(render);
@@ -480,7 +551,6 @@ export default function InteractiveHeroLens() {
       onTouchMove={handleMouseMove}
       className="relative w-full h-screen min-h-screen overflow-hidden select-none bg-black cursor-crosshair"
     >
-      {/* Source clip: decoded off-screen and sampled into the shader each frame */}
       <video
         ref={videoRef}
         className="absolute inset-0 w-full h-full object-cover opacity-0 pointer-events-none"
@@ -493,13 +563,11 @@ export default function InteractiveHeroLens() {
         aria-hidden="true"
       />
 
-      {/* The composite: mask + face, resolved on the GPU */}
       <canvas
         ref={canvasRef}
         className="absolute inset-0 w-full h-full pointer-events-none z-10"
       />
 
-      {/* Plain fallback if WebGL is unavailable */}
       {glFailed && (
         <div className="absolute inset-0 z-10">
           <video
@@ -514,7 +582,7 @@ export default function InteractiveHeroLens() {
           <img
             src={FACE_SRC}
             alt="Evans Rwothomio"
-            className="absolute left-1/2 top-1/2 h-[90%] -translate-x-1/2 -translate-y-1/2 object-contain mix-blend-screen opacity-80"
+            className="absolute left-1/2 top-1/2 h-[92%] -translate-x-1/2 -translate-y-1/2 object-contain mix-blend-screen opacity-75"
             style={{
               WebkitMaskImage:
                 "radial-gradient(ellipse 46% 52% at 50% 43%, #000 55%, transparent 100%)",
@@ -525,11 +593,9 @@ export default function InteractiveHeroLens() {
         </div>
       )}
 
-      {/* Legibility scrims */}
       <div className="absolute inset-x-0 top-0 h-32 z-[12] pointer-events-none bg-gradient-to-b from-black/70 to-transparent" />
       <div className="absolute inset-x-0 bottom-0 h-[45%] z-[12] pointer-events-none bg-gradient-to-t from-black/90 via-black/35 to-transparent" />
 
-      {/* ---------------- TOP HUD ---------------- */}
       <header className="absolute top-6 left-6 right-6 z-40 flex items-center justify-between text-xs font-mono uppercase tracking-widest text-zinc-400 pointer-events-auto">
         <div className="flex items-center gap-3 bg-black/60 backdrop-blur-md px-4 py-2 rounded-full border border-white/10 shadow-xl">
           <span className="w-2 h-2 rounded-full bg-fuchsia-400 animate-pulse" />
@@ -554,7 +620,6 @@ export default function InteractiveHeroLens() {
         </div>
       </header>
 
-      {/* ---------------- CTA ---------------- */}
       <div className="absolute left-6 sm:left-12 md:left-16 lg:left-24 bottom-16 sm:bottom-20 md:bottom-24 z-30 pointer-events-auto">
         <div className="flex flex-wrap items-center gap-4">
           <button
@@ -578,7 +643,6 @@ export default function InteractiveHeroLens() {
         </div>
       </div>
 
-      {/* ---------------- BOTTOM RIGHT HUD ---------------- */}
       <div className="absolute right-6 sm:right-12 bottom-8 sm:bottom-12 z-30 hidden md:flex flex-col items-end pointer-events-none text-right font-mono">
         <span className="text-[11px] text-cyan-400 uppercase tracking-widest font-semibold">
           {"// FUTURISTIC / SYNTHWAVE / DUOTONE"}
@@ -591,7 +655,6 @@ export default function InteractiveHeroLens() {
         </span>
       </div>
 
-      {/* ---------------- SCROLL INDICATOR ---------------- */}
       <button
         onClick={scrollToStory}
         aria-label="Scroll to main content"
