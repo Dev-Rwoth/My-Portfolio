@@ -48,6 +48,13 @@ const EYE_R = { x: 0.625, y: 0.42 };
 const FACE_SKIN = 0.26;
 // Push the whole welded composite right, clearing the left for the copy.
 const MASK_SHIFT_X = 0.13;
+// The cubes sweep on the clip's own clock; speeding playback makes them
+// genuinely swing faster rather than faking it with a timer.
+const MASK_PLAYBACK_RATE = 1.9;
+// If the measured wave is too flat to read, the swing is synthesised at this
+// period (seconds per full there-and-back) so the copy never sits half-erased.
+const SWING_PERIOD = 3.4;
+const MIN_SPAN = 0.035;
 
 const VERT = `
 attribute vec2 a_position;
@@ -449,6 +456,7 @@ export default function InteractiveHeroLens() {
     // 0..1 of ACTUAL travel. Expands to a new extreme fast, contracts slowly.
     let sMin = 1;
     let sMax = 0;
+    let seeded = false;
 
     const videoXToScreenX = (u: number) => {
       const sA = canvas.width / Math.max(1, canvas.height);
@@ -493,12 +501,28 @@ export default function InteractiveHeroLens() {
       // ease, or the centroid jitters frame to frame
       sweepSmoothed += (screenX - sweepSmoothed) * 0.12;
 
+      // Seed the window on the first real sample; starting inverted made the
+      // two bounds collapse onto each other and the travel value thrash.
+      if (!seeded) {
+        sMin = sweepSmoothed - 0.02;
+        sMax = sweepSmoothed + 0.02;
+        seeded = true;
+      }
+
       sMin += (sweepSmoothed - sMin) * (sweepSmoothed < sMin ? 0.5 : 0.002);
       sMax += (sweepSmoothed - sMax) * (sweepSmoothed > sMax ? 0.5 : 0.002);
 
-      const span = Math.max(0.05, sMax - sMin);
-      const travel = Math.min(1, Math.max(0, (sweepSmoothed - sMin) / span));
-      publishSweep(travel);
+      const span = sMax - sMin;
+
+      if (span < MIN_SPAN) {
+        // Wave too flat to read reliably - synthesise a clean swing so the
+        // copy still completes its cycle instead of hanging mid-erase.
+        const phase = (performance.now() * 0.001 * Math.PI * 2) / SWING_PERIOD;
+        publishSweep(0.5 + 0.5 * Math.sin(phase));
+        return;
+      }
+
+      publishSweep(Math.min(1, Math.max(0, (sweepSmoothed - sMin) / span)));
     };
 
     let faceAspect = 765 / 1024;
@@ -552,6 +576,11 @@ export default function InteractiveHeroLens() {
     if (video) {
       video.addEventListener("loadeddata", onVideoReady);
       video.addEventListener("playing", onVideoReady);
+      video.playbackRate = MASK_PLAYBACK_RATE;
+      // some browsers reset the rate when the source (re)loads
+      video.addEventListener("loadeddata", () => {
+        video.playbackRate = MASK_PLAYBACK_RATE;
+      });
       const p = video.play();
       if (p && typeof p.catch === "function") p.catch(() => undefined);
     }

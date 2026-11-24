@@ -81,8 +81,16 @@ const IN_DUR = N * STAGGER + CHAR_IN + SETTLE;
 /** Softness of the wave front, in fractions of the block's width. */
 const FRONT_W = 0.18;
 /** Front travels past both edges so the copy fully clears and fully returns. */
-const FRONT_FROM = -0.2;
-const FRONT_TO = 1.2;
+const FRONT_FROM = -0.25;
+const FRONT_TO = 1.25;
+
+/* The raw wave spends most of its time mid-range, which left the copy
+   permanently half-erased. These saturate the ends of each swing: above
+   SHAPE_HI the line is FULLY intact, below SHAPE_LO fully gone. The window is
+   deliberately lopsided so the words sit clear and readable for most of the
+   swing and are only briefly consumed. */
+const SHAPE_LO = 0.12;
+const SHAPE_HI = 0.42;
 
 const randGlyph = () => GLYPHS[(Math.random() * GLYPHS.length) | 0];
 
@@ -190,7 +198,8 @@ export default function DecodingHeadline() {
          and the line is fully consumed; travel 1 brings it back past the right
          edge and the line fully returns. A cell is intact while the front is
          still to its right. */
-      const travel = isSweepActive() ? getSweep() : 1;
+      const raw = isSweepActive() ? getSweep() : 1;
+      const travel = smoothstep(SHAPE_LO, SHAPE_HI, raw);
       const front = FRONT_FROM + travel * (FRONT_TO - FRONT_FROM);
 
       for (let i = 0; i < N; i++) {
